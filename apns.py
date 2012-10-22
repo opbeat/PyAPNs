@@ -27,11 +27,14 @@ from binascii import a2b_hex, b2a_hex
 from datetime import datetime, timedelta
 from time import mktime
 from random import getrandbits
-from socket import socket, AF_INET, SOCK_STREAM
+from socket import socket, AF_INET, SOCK_STREAM, timeout
 from struct import pack, unpack
+
+import os
 
 try:
     from ssl import wrap_socket
+    from ssl import SSLError
 except ImportError:
     from socket import ssl as wrap_socket
 
@@ -41,6 +44,8 @@ except ImportError:
     import simplejson as json
 
 MAX_PAYLOAD_LENGTH = 256
+
+TIMEOUT = float(os.environ.get('APNS_TIMEOUT', 0.5))
 
 class APNs(object):
     """A class representing an Apple Push Notification service connection"""
@@ -111,12 +116,13 @@ class APNsConnection(object):
     """
     A generic connection class for communicating with the APNs
     """
-    def __init__(self, cert_file=None, key_file=None):
+    def __init__(self, cert_file=None, key_file=None, timeout=TIMEOUT):
         super(APNsConnection, self).__init__()
         self.cert_file = cert_file
         self.key_file = key_file
         self._socket = None
         self._ssl = None
+        self.timeout = timeout
 
     def __del__(self):
         self._disconnect();
@@ -125,11 +131,13 @@ class APNsConnection(object):
         # Establish an SSL connection
         self._socket = socket(AF_INET, SOCK_STREAM)
         self._socket.connect((self.server, self.port))
+        self._socket.settimeout(self.timeout)
         self._ssl = wrap_socket(self._socket, self.key_file, self.cert_file)
 
     def _disconnect(self):
         if self._socket:
             self._socket.close()
+            self._ssl = None # Make sure we reconnect on next try
 
     def _connection(self):
         if not self._ssl:
@@ -267,27 +275,30 @@ class FeedbackConnection(APNsConnection):
                     # some more data and append to buffer
                     break
 
-class UnknownResponse(Exception):
+class APNResponseError(Exception):
+    pass
+
+class UnknownResponse(APNResponseError):
     def __init__(self):
         super(UnknownResponse, self).__init__()
 
-class UnknownError(Exception):
+class UnknownError(APNResponseError):
     def __init__(self):
         super(UnknownError, self).__init__()
 
-class ProcessingError(Exception):
+class ProcessingError(APNResponseError):
     def __init__(self):
         super(ProcessingError, self).__init__()
 
-class InvalidTokenSizeError(Exception):
+class InvalidTokenSizeError(APNResponseError):
     def __init__(self):
         super(InvalidTokenSizeError, self).__init__()
 
-class InvalidPayloadSizeError(Exception):
+class InvalidPayloadSizeError(APNResponseError):
     def __init__(self):
         super(InvalidPayloadSizeError, self).__init__()
 
-class InvalidTokenError(Exception):
+class InvalidTokenError(APNResponseError):
     def __init__(self):
         super(InvalidTokenError, self).__init__()
 
@@ -324,22 +335,34 @@ class GatewayConnection(APNsConnection):
             expiry = datetime.now() + timedelta(30)
         
         identifier = pack('>I', getrandbits(32))
-        self.write(self._get_notification(token_hex, payload, identifier, expiry))
-        
-        error_response = self.read(6)
-        if error_response != '':
-            command = error_response[0]
-            status = ord(error_response[1])
-            response_identifier = error_response[2:6]
-            
-            if command != '\x08' or response_identifier != identifier:
-                raise UnknownResponse()
-            
-            if status == 0:
-                return
-            
-            raise {1: ProcessingError,
-                   5: InvalidTokenSizeError,
-                   7: InvalidPayloadSizeError,
-                   8: InvalidTokenError}.get(status, UnknownError)()
 
+        try: # Connection might have been closed
+            self.write(self._get_notification(token_hex, payload, identifier, expiry))
+        except SSLError:
+            # We were disconnected or timeout.
+            # Prepare to reconnect.
+            self._disconnect()
+        else:
+            try:
+                error_response = self.read(6)
+                if error_response != '':
+                    command = error_response[0]
+                    status = ord(error_response[1])
+                    response_identifier = error_response[2:6]
+                    
+                    if command != '\x08' or response_identifier != identifier:
+                        raise UnknownResponse()
+                    
+                    if status == 0:
+                        return
+                    
+                    raise {1: ProcessingError,
+                           5: InvalidTokenSizeError,
+                           7: InvalidPayloadSizeError,
+                           8: InvalidTokenError}.get(status, UnknownError)()
+            except (SSLError, timeout), ex:
+                 # SSL throws SSLError instead of timeout, see http://bugs.python.org/issue10272
+                pass # Timeouts are OK - don't reconnect
+            except APNResponseError:
+                self._disconnect() # Make sure we're ready for next send.
+                raise
