@@ -27,7 +27,7 @@ from binascii import a2b_hex, b2a_hex
 from datetime import datetime, timedelta
 from time import mktime
 from random import getrandbits
-from socket import socket, AF_INET, SOCK_STREAM, timeout
+from socket import socket, AF_INET, SOCK_STREAM, timeout, error
 from struct import pack, unpack
 
 import os
@@ -338,7 +338,7 @@ class GatewayConnection(APNsConnection):
 
         try: # Connection might have been closed
             self.write(self._get_notification(token_hex, payload, identifier, expiry))
-        except SSLError:
+        except (SSLError, error):
             # We were disconnected or timeout.
             # Prepare to reconnect.
             self._disconnect()
