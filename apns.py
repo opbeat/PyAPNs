@@ -26,15 +26,14 @@
 from binascii import a2b_hex, b2a_hex
 from datetime import datetime, timedelta
 from time import mktime
-from socket import socket, AF_INET, SOCK_STREAM, timeout
+from socket import socket, AF_INET, SOCK_STREAM
 from struct import pack, unpack
-
-import os
 import string
-
 import logging
 
+
 logger = logging.getLogger('apns')
+
 
 try:
     from ssl import wrap_socket
@@ -47,7 +46,9 @@ try:
 except ImportError:
     import simplejson as json
 
+
 MAX_PAYLOAD_LENGTH = 256
+
 
 class APNs(object):
     """A class representing an Apple Push Notification service connection"""
@@ -178,14 +179,14 @@ class PayloadAlert(object):
             d['launch-image'] = self.launch_image
         return d
 
+
 class PayloadTooLargeError(Exception):
-    def __init__(self):
-        super(PayloadTooLargeError, self).__init__()
+    pass
+
 
 class Payload(object):
     """A class representing an APNs message payload"""
-    def __init__(self, alert=None, badge=None, sound=None, custom={}):
-        super(Payload, self).__init__()
+    def __init__(self, alert=None, badge=None, sound=None, custom=None):
         self.alert = alert
         self.badge = badge
         self.sound = sound
@@ -194,25 +195,34 @@ class Payload(object):
 
     def dict(self):
         """Returns the payload as a regular Python dictionary"""
-        d = {}
+        aps = {}
         if self.alert:
             # Alert can be either a string or a PayloadAlert
             # object
             if isinstance(self.alert, PayloadAlert):
-                d['alert'] = self.alert.dict()
+                aps['alert'] = self.alert.dict()
             else:
-                d['alert'] = self.alert
+                aps['alert'] = self.alert
         if self.sound:
-            d['sound'] = self.sound
+            aps['sound'] = self.sound
         if self.badge is not None:
-            d['badge'] = int(self.badge)
+            aps['badge'] = int(self.badge)
 
-        d = { 'aps': d }
-        d.update(self.custom)
-        return d
+        payload = {
+            'aps': aps
+        }
+
+        if self.custom:
+            payload.update(self.custom)
+
+        return payload
 
     def json(self):
-        return json.dumps(self.dict(), separators=(',',':'), ensure_ascii=False).encode('utf-8')
+        return json.dumps(
+            self.dict(),
+            separators=(',', ':'),
+            ensure_ascii=False
+        ).encode('utf-8')
 
     def _check_size(self):
         payload = self.json()
@@ -285,6 +295,7 @@ class FeedbackConnection(APNsConnection):
                     # some more data and append to buffer
                     break
 
+
 class Notification(object):
     def __init__(self, token_hex, payload, identifier=0, expiry=None):
         assert all(c in string.hexdigits for c in token_hex)
@@ -311,20 +322,31 @@ class Notification(object):
         payload_json = self.payload.json()
         payload_length_bin = APNs.packed_ushort_big_endian(len(payload_json))
 
-        notification = ('\x01' + identifier_bin + expiry_bin + token_length_bin + token_bin
-            + payload_length_bin + payload_json)
+        notification = (
+            '\x01' + identifier_bin + expiry_bin
+            + token_length_bin + token_bin
+            + payload_length_bin + payload_json
+        )
 
         return notification
 
     def __repr__(self):
-        return '<%s to %s id:%d>' % (repr(self.payload), self.token_hex, self.identifier)
+        return '<%s to %s id:%d>' % (
+            repr(self.payload), self.token_hex, self.identifier
+        )
+
 
 class GatewayConnection(APNsConnection):
     """
     A class that represents a connection to the APNs gateway server
 
-    This class will guarentee that well-formed notifications will arrive at their destination.
-    Read http://redth.info/the-problem-with-apples-push-notification-ser/ for a detailed description of the problem and the solution, implemented below
+    This class will guarantee that well-formed notifications will
+    arrive at their destination.
+
+    Read http://redth.info/the-problem-with-apples-push-notification-ser/
+    for a detailed description of the problem and the solution,
+    implemented below.
+
     """
     def __init__(self, use_sandbox=False, **kwargs):
         super(GatewayConnection, self).__init__(**kwargs)
@@ -339,28 +361,39 @@ class GatewayConnection(APNsConnection):
     def flush(self):
         """
         Check for all notifications if they were correctly sent.
-        If this method is not called after your batch of notifications there might be notifications that did not arrive at their destination
-        If for example a notification somewhere in the middle of your batch is corrupted (see the response dictionary below for a list of possible problems)
-        it is possible that that notification AND ALL NOTIFICATIONS AFTER IT will be discarded by Apple.
+
+        If this method is not called after your batch of
+        notifications there might be notifications that
+        did not arrive at their destination.
+
+        If for example a notification somewhere in the middle
+        of your batch is corrupted (see the response dictionary
+        below for a list of possible problems)
+        it is possible that that notification
+        AND ALL NOTIFICATIONS AFTER IT will be discarded by Apple.
+
         """
         if len(self.in_flight_notifications):
             while self._check_for_errors(timeout=1):
                 pass
 
-        # If the APN server has no error codes left to tell us we can assume that all in-flight notifications have arrived
+        # If the APN server has no error codes left to tell us we
+        # can assume that all in-flight notifications have arrived
         self.in_flight_notifications = []
 
     def _check_for_errors(self, timeout=0):
         """
         Try to read error codes from the APNS gateway server.
 
-        This tells us which notification failed,
-        which succeeded (all notifications sent before the failed notification)
-        and which need to be resent (all notifications sent after the failed notification)
+        This tells us which notification failed, which succeeded
+        (all notifications sent before the failed notification)
+        and which need to be resent (all notifications sent after
+        the failed notification)
 
         Will return a boolean that indicates if it sent out new notifications.
+
         """
-        resended_notifications = False
+        resent_notifications = False
         try:
             error_response = self.read(6, timeout=timeout)
             if not error_response:
@@ -378,22 +411,27 @@ class GatewayConnection(APNsConnection):
 
             in_flight = self.in_flight_notifications
 
-            # Every notification in in_flight will either succeeded, fail or be marked for resending
+            # Every notification in in_flight will either succeeded,
+            # fail or be marked for resending
             # We can start afresh with the list of in flight notifications
             self.in_flight_notifications = []
 
             needs_resending = []
 
-            # Check for all previously sent notifications if they arrived or not
+            # Check for all previously sent notifications
+            # if they arrived or not
             for notification in in_flight:
                 if identifier and notification.identifier < identifier:
-                    # This notification was *before* the problematic notification.
-                    # We can assume it was sent successfully and don't have to do anything with it anymore
+                    # This notification was *before* the problematic
+                    # notification. We can assume it was sent successfully
+                    # and don't have to do anything with it anymore
                     pass
                 elif identifier and notification.identifier == identifier:
                     if status > 0:
-                        # This was the notification that tripped up the APN server.
-                        # Save it to a list of failed notifications so that the API user can process them somehow
+                        # This was the notification that tripped up
+                        # the APN server. Save it to a list of failed
+                        # notifications so that the API user can process
+                        # them somehow
                         response = {
                             1: 'Processing error',
                             2: 'Missing device token',
@@ -402,31 +440,37 @@ class GatewayConnection(APNsConnection):
                             5: 'Invalid token size',
                             6: 'Invalid topic size',
                             7: 'Invalid payload size',
-                            8: 'Invalid token'}.get(status, 'Unknown Error')
+                            8: 'Invalid token'
+                        }.get(status, 'Unknown Error')
 
                         notification.fail_reason = (status, response)
 
                         self.failed_notifications.append(notification)
                 else:
                     if status > 0:
-                        # This notification was sent *after* the problematic notification
-                        # We can assume that it was not sent and needs to be resent.
+                        # This notification was sent *after*
+                        # the problematic notification We can assume
+                        # that it was not sent and needs to be resent.
                         needs_resending.append(notification)
                     else:
-                        # Unless offcourse it was not problematic at all and Apple sends an "Error" that no errors were encountered (status code 0)
-                        # In that case we still don't know the fate of the notification and have to put it back in-flight
+                        # Unless, off course, it was not problematic at all
+                        # and Apple sends an "Error" that no errors were
+                        # encountered (status code 0) In that case we still
+                        # don't know the fate of the notification and have
+                        # to put it back in-flight
                         self.in_flight_notifications.append(notification)
 
             for notification in needs_resending:
                 self.send(notification)
-                resended_notifications = True
+                resent_notifications = True
 
-        except (SSLError, timeout), ex:
-            # SSL throws SSLError instead of timeout, see http://bugs.python.org/issue10272
+        except (SSLError, timeout) as ex:
+            # SSL throws SSLError instead of timeout,
+            #  see http://bugs.python.org/issue10272
             # Timeouts are OK - don't reconnect
             logger.info("Threw exception: %s", ex)
 
-        return resended_notifications
+        return resent_notifications
 
     def send_notification(self, token_hex, payload, expiry=None):
         self.send(Notification(token_hex, payload, expiry))
