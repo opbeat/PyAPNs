@@ -215,8 +215,15 @@ class Payload(object):
         return json.dumps(self.dict(), separators=(',',':'), ensure_ascii=False).encode('utf-8')
 
     def _check_size(self):
-        if len(self.json()) > MAX_PAYLOAD_LENGTH:
-            raise PayloadTooLargeError()
+        payload = self.json()
+        length = len(payload)
+        if length > MAX_PAYLOAD_LENGTH:
+            raise PayloadTooLargeError(
+                'The serialized payload is too long:'
+                ' {length} vs. the maximum of {max}'
+                .format(length=length, max=MAX_PAYLOAD_LENGTH),
+                payload
+            )
 
     def __repr__(self):
         attrs = ("alert", "badge", "sound", "custom")
