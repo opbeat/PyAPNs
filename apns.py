@@ -47,7 +47,7 @@ except ImportError:
     import simplejson as json
 
 
-MAX_PAYLOAD_LENGTH = 256
+MAX_PAYLOAD_LENGTH = 2048
 
 
 class APNs(object):
